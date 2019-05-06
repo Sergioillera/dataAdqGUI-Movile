@@ -14,12 +14,18 @@ import matplotlib.gridspec as gridspec
 from mpl_toolkits.mplot3d import Axes3D
 import threading, queue
 import sys
+import socket
+import pickle
+from datetime import datetime
 
 
 class MainWindow(QtWidgets.QWidget): #creamos la ventana principal
     
     ancho=600
     alto=700
+    HOST = '192.168.1.14'  # Standard loopback interface address (localhost)
+    PORT = 65432        # Port to listen on (non-privileged ports are > 1023)
+    conectado=False
     
     def __init__(self, parent=None): #el constructor de la ventana principal
         QtWidgets.QWidget.__init__(self)
@@ -59,44 +65,95 @@ class MainWindow(QtWidgets.QWidget): #creamos la ventana principal
         self.measure_label = QLabel('       ',self)
         self.measure_label.move(100, self.alto-80)
         
+        #checkbox para guardar datos
+        self.write2file = QCheckBox("Escribir a archivo",self)
+        self.write2file.move(100, self.alto-50)
                 
     def iniciar(self):
-        archivo='ej_datos.txt'
+        #create the server
+        #check if we have to create the server or is already created (for the pause purposes)
+        if not (self.conectado): #creamos el servidor
+            s=socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.bind((self.HOST, self.PORT))
+            self.status_label.setText('Creado servidor')
+            print('Esperando conexion...')
+            s.listen()
+            self.conn, addr = s.accept()
+            self.status_label.setText('Cliente conectado')
+            print('Connected by', addr)
+            self.conectado=True
+        else:
+            #conexion already exist in self.conn
+            pass 
+        
         self.start=True
         q = queue.Queue()
-        self.thread1 = threading.Thread(target=self.read_data,args=(archivo,q))
-        self.thread2 = threading.Thread(target=self.recibir_and_plot,args=(q,))
+        #thread1 = threading.Thread(target=self.read_data,args=(archivo,q))
+        thread1 = threading.Thread(target=self.receive_data,args=(q,))
+        thread2 = threading.Thread(target=self.plot_data,args=(q,))
         print ('Iniciamos los threads')
-        self.thread1.start()
-        self.thread2.start()    
+        thread1.start()
+        thread2.start()    
     
-    
-    def read_data(self,arch,q):
-        self.status_label.setText('Leyendo datos...')
-        archivo=open(arch,'r')
-        dT=archivo.readline()
-        dt=float(dT[dT.index('=')+1:-1])
-        q.put(dt) #envia el dt
-        for line in archivo.readlines():
-            accs=line.replace('\n','')[1:-1].split(',')
-            dato=[]
-            for acc in accs:
-                dato.append(float(acc))
-            q.put(dato) #envia el dato
-        q.put(None) #enviamos el fin del archivo
+
+    def receive_data(self,q):
+        while self.start:
+            data = self.conn.recv(1024)
+            #print(pickle.loads(data))
+            if pickle.loads(data) == 'START':
+                self.conn.sendall(pickle.dumps('TRUE'))
+                print('Se inicia el recibo de datos')
+                dt = pickle.loads(self.conn.recv(1024))
+                q.put(dt) #envia el dt al otro thread
+            elif pickle.loads(data) == 'END':
+                q.put(None)
+                self.status_label.setText('Cliente cierra conexion')
+                break
+            else:
+                q.put(pickle.loads(data)) 
+        
+        q.put(None) #exiting the thread due to pause button
         return
+    
 
 
-    def recibir_and_plot(self,q):
+    #test function for comunication between threads with the data read from a file
+    #Function deprecated by the server creation and data obtained from client
+    #def read_data(self,arch,q):     
+    #    self.status_label.setText('Leyendo datos...')
+    #    archivo=open(arch,'r')
+    #    dT=archivo.readline()
+    #    dt=float(dT[dT.index('=')+1:-1])
+    #    q.put(dt) #envia el dt
+    #    for line in archivo.readlines():
+    #        accs=line.replace('\n','')[1:-1].split(',')
+    #        dato=[]
+    #        for acc in accs:
+    #            dato.append(float(acc))
+    #        q.put(dato) #envia el dato
+    #    q.put(None) #enviamos el fin del archivo
+    #    return
+    
+    
+    def plot_data(self,q):
         dt=q.get() #hasta que reciba el primer dato
         print('El dt',dt)
         i=0
+        
+        if self.write2file.isChecked() :
+        #checkbox si quieres escribir a archivo los datos
+            archivo=open('datos.txt','a+')
+            archivo.write(datetime.now().strftime('%Y-%m-%d %H:%M:%S')+'\n')
+            archivo.write(str(dt)+'\n')
+
+        
+        
         while self.start:
             dato=q.get() #las acceleraciones
             #print(i,dato)
             self.status_label.setText('Leyendo datos...')
             if dato==None:
-                self.status_label.setText('Datos leidos')
+                self.status_label.setText('Datos leidos o pausa')
                 break
             else:
                 self.figura_plots.ax1.cla()
@@ -117,6 +174,14 @@ class MainWindow(QtWidgets.QWidget): #creamos la ventana principal
                 if i%10==0:
                     print(i)
                     self.measure_label.setText(str(i))
+                    
+                if self.write2file.isChecked():
+                    archivo.write(str(dato)+'\n')
+                    
+        #cerrar el archivo de escritura
+        if self.write2file.isChecked(): 
+            archivo.write('\n')
+            archivo.close()
         return         
     
     
